@@ -1,0 +1,179 @@
+#define _POSIX_C_SOURCE 200809L
+
+#include <errno.h>
+#include <signal.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "iouringd/client.h"
+#include "iouringd/submit.h"
+
+static int wait_for_connect(const char *socket_path, pid_t child)
+{
+    struct timespec delay;
+    int attempt;
+
+    delay.tv_sec = 0;
+    delay.tv_nsec = 10000000L;
+
+    for (attempt = 0; attempt < 100; ++attempt) {
+        int fd;
+        int status;
+        pid_t rc = waitpid(child, &status, WNOHANG);
+
+        if (rc == child) {
+            return -1;
+        }
+
+        fd = iouringd_client_connect(socket_path);
+        if (fd >= 0) {
+            return fd;
+        }
+
+        nanosleep(&delay, NULL);
+    }
+
+    return -1;
+}
+
+int main(int argc, char **argv)
+{
+    struct iouringd_completion_record_v1 cancel_completion;
+    struct iouringd_completion_record_v1 timeout_completion;
+    struct iouringd_handshake_result_v1 cancel_handshake;
+    struct iouringd_handshake_result_v1 timeout_handshake;
+    struct iouringd_task_id_record_v1 cancel_task;
+    struct iouringd_task_id_record_v1 timeout_task;
+    char socket_path[108];
+    pid_t child;
+    int cancel_fd;
+    int status;
+    int timeout_fd;
+
+    if (argc != 2) {
+        return 2;
+    }
+
+    alarm(10);
+    snprintf(socket_path,
+             sizeof(socket_path),
+             "/tmp/iouringd-cancel-timeout-%ld.sock",
+             (long)getpid());
+    unlink(socket_path);
+
+    child = fork();
+    if (child < 0) {
+        return 1;
+    }
+
+    if (child == 0) {
+        execl(argv[1], argv[1], socket_path, (char *)NULL);
+        _exit(127);
+    }
+
+    timeout_fd = wait_for_connect(socket_path, child);
+    cancel_fd = wait_for_connect(socket_path, child);
+    if (timeout_fd < 0 || cancel_fd < 0) {
+        if (timeout_fd >= 0) {
+            close(timeout_fd);
+        }
+        if (cancel_fd >= 0) {
+            close(cancel_fd);
+        }
+        kill(child, SIGTERM);
+        waitpid(child, &status, 0);
+        unlink(socket_path);
+        return 1;
+    }
+
+    memset(&timeout_handshake, 0, sizeof(timeout_handshake));
+    memset(&cancel_handshake, 0, sizeof(cancel_handshake));
+    if (iouringd_client_handshake_fd(timeout_fd, &timeout_handshake) != 0 ||
+        iouringd_client_handshake_fd(cancel_fd, &cancel_handshake) != 0) {
+        close(timeout_fd);
+        close(cancel_fd);
+        kill(child, SIGTERM);
+        waitpid(child, &status, 0);
+        unlink(socket_path);
+        return 1;
+    }
+
+    if ((timeout_handshake.capabilities.op_mask & IOURINGD_CAPABILITY_OP_TIMEOUT) == 0u ||
+        (cancel_handshake.capabilities.op_mask & IOURINGD_CAPABILITY_OP_ASYNC_CANCEL) == 0u) {
+        close(timeout_fd);
+        close(cancel_fd);
+        kill(child, SIGTERM);
+        waitpid(child, &status, 0);
+        unlink(socket_path);
+        return 1;
+    }
+
+    memset(&timeout_task, 0, sizeof(timeout_task));
+    if (iouringd_submit_timeout(timeout_fd, UINT64_C(5000000000), &timeout_task) != 0) {
+        close(timeout_fd);
+        close(cancel_fd);
+        kill(child, SIGTERM);
+        waitpid(child, &status, 0);
+        unlink(socket_path);
+        return 1;
+    }
+
+    memset(&cancel_task, 0, sizeof(cancel_task));
+    if (iouringd_submit_cancel(cancel_fd, timeout_task.task_id, &cancel_task) != 0) {
+        close(timeout_fd);
+        close(cancel_fd);
+        kill(child, SIGTERM);
+        waitpid(child, &status, 0);
+        unlink(socket_path);
+        return 1;
+    }
+
+    memset(&cancel_completion, 0, sizeof(cancel_completion));
+    if (iouringd_wait_completion(cancel_fd, &cancel_completion) != 0 ||
+        cancel_completion.task.task_id != cancel_task.task_id ||
+        cancel_completion.task_kind.value != IOURINGD_TASK_KIND_CANCEL ||
+        cancel_completion.res != 0) {
+        close(timeout_fd);
+        close(cancel_fd);
+        kill(child, SIGTERM);
+        waitpid(child, &status, 0);
+        unlink(socket_path);
+        return 1;
+    }
+
+    memset(&timeout_completion, 0, sizeof(timeout_completion));
+    if (iouringd_wait_completion(timeout_fd, &timeout_completion) != 0 ||
+        timeout_completion.task.task_id != timeout_task.task_id ||
+        timeout_completion.task_kind.value != IOURINGD_TASK_KIND_TIMEOUT ||
+        timeout_completion.res != -ECANCELED) {
+        close(timeout_fd);
+        close(cancel_fd);
+        kill(child, SIGTERM);
+        waitpid(child, &status, 0);
+        unlink(socket_path);
+        return 1;
+    }
+
+    close(timeout_fd);
+    close(cancel_fd);
+
+    kill(child, SIGTERM);
+    if (waitpid(child, &status, 0) != child) {
+        unlink(socket_path);
+        return 1;
+    }
+
+    unlink(socket_path);
+    if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGTERM) {
+        return 1;
+    }
+
+    return 0;
+}

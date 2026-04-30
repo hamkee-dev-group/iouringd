@@ -1,0 +1,13 @@
+#ifndef IOURINGD_VERSION_H
+#define IOURINGD_VERSION_H
+
+#define IOURINGD_VERSION_MAJOR 0
+#define IOURINGD_VERSION_MINOR 1
+#define IOURINGD_VERSION_PATCH 0
+
+#define IOURINGD_PROTOCOL_VERSION 1
+#define IOURINGD_VERSION_STRING "0.1.0"
+
+const char *iouringd_version_string(void);
+
+#endif

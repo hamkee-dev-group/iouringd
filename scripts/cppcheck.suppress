@@ -1,0 +1,2 @@
+# The protocol task kind test intentionally verifies fixed enum wire values.
+knownConditionTrueFalse:tests/test_protocol_task_kinds.c
