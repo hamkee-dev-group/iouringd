@@ -2264,6 +2264,14 @@ static iouringd_resource_id_t iouringd_allocate_resource_id(
     return IOURINGD_RESOURCE_ID_INVALID;
 }
 
+static void iouringd_unallocate_resource_id(struct iouringd_client *client,
+                                            iouringd_resource_id_t resource_id)
+{
+    if (resource_id != IOURINGD_RESOURCE_ID_INVALID) {
+        client->next_resource_id = resource_id;
+    }
+}
+
 static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                             size_t client_index)
 {
@@ -2823,12 +2831,19 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                         task->open_flags,
                                         task->open_mode,
                                         task->submit_priority) != 0) {
+            int saved_errno = errno;
+
             if (result_file_resource->in_flight != 0u) {
                 result_file_resource->in_flight -= 1u;
             }
             iouringd_clear_file_slot(result_file_resource);
+            iouringd_unallocate_resource_id(client, result_resource_id);
             iouringd_clear_task_slot(task);
-            return -1;
+            if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                return -1;
+            }
+            iouringd_finish_client_request(client);
+            return 1;
         }
 
         runtime->next_task_id += 1u;
@@ -2950,8 +2965,11 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                 return -1;
             }
             iouringd_clear_task_slot(task);
-            errno = saved_errno;
-            return -1;
+            if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                return -1;
+            }
+            iouringd_finish_client_request(client);
+            return 1;
         }
 
         runtime->next_task_id += 1u;
@@ -3155,9 +3173,15 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                             &task->io_vector,
                                             1u,
                                             task->submit_priority) != 0) {
+                int saved_errno = errno;
+
                 file_resource->in_flight -= 1u;
                 iouringd_clear_task_slot(task);
-                return -1;
+                if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                    return -1;
+                }
+                iouringd_finish_client_request(client);
+                return 1;
             }
         } else if (task->task_kind == IOURINGD_TASK_KIND_SOCK_READ ||
                    task->task_kind == IOURINGD_TASK_KIND_FILE_READ) {
@@ -3169,9 +3193,15 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                            &task->io_vector,
                                            1u,
                                            task->submit_priority) != 0) {
+                int saved_errno = errno;
+
                 file_resource->in_flight -= 1u;
                 iouringd_clear_task_slot(task);
-                return -1;
+                if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                    return -1;
+                }
+                iouringd_finish_client_request(client);
+                return 1;
             }
         } else if (task->task_kind == IOURINGD_TASK_KIND_CONNECT) {
             memcpy(task->io_buffer, client->io_payload, task->io_length);
@@ -3181,9 +3211,15 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                              task->io_buffer,
                                              task->io_length,
                                              task->submit_priority) != 0) {
+                int saved_errno = errno;
+
                 file_resource->in_flight -= 1u;
                 iouringd_clear_task_slot(task);
-                return -1;
+                if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                    return -1;
+                }
+                iouringd_finish_client_request(client);
+                return 1;
             }
         } else if (task->task_kind == IOURINGD_TASK_KIND_ACCEPT) {
             if (iouringd_ring_submit_accept(&runtime->ring,
@@ -3195,14 +3231,20 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                             task->submit_priority) != 0) {
                 struct iouringd_resource_slot *result_file_resource =
                     &client->file_resources[task->result_file_slot_index];
+                int saved_errno = errno;
 
                 file_resource->in_flight -= 1u;
                 if (result_file_resource->in_flight != 0u) {
                     result_file_resource->in_flight -= 1u;
                 }
                 iouringd_clear_file_slot(result_file_resource);
+                iouringd_unallocate_resource_id(client, task->result_resource_id);
                 iouringd_clear_task_slot(task);
-                return -1;
+                if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                    return -1;
+                }
+                iouringd_finish_client_request(client);
+                return 1;
             }
         } else if (task->task_kind == IOURINGD_TASK_KIND_POLL) {
             if (iouringd_ring_submit_poll(&runtime->ring,
@@ -3212,9 +3254,15 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                                                      file_slot_index),
                                           task->poll_mask,
                                           task->submit_priority) != 0) {
+                int saved_errno = errno;
+
                 file_resource->in_flight -= 1u;
                 iouringd_clear_task_slot(task);
-                return -1;
+                if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                    return -1;
+                }
+                iouringd_finish_client_request(client);
+                return 1;
             }
         } else if (task->task_kind == IOURINGD_TASK_KIND_SOCK_WRITE_FIXED) {
             if (iouringd_ring_submit_write_fixed(
@@ -3229,12 +3277,18 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                                (size_t)task->buffer_slot_index),
                     task->io_length,
                     task->submit_priority) != 0) {
+                int saved_errno = errno;
+
                 file_resource->in_flight -= 1u;
                 if (buffer_resource != NULL) {
                     buffer_resource->in_flight -= 1u;
                 }
                 iouringd_clear_task_slot(task);
-                return -1;
+                if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                    return -1;
+                }
+                iouringd_finish_client_request(client);
+                return 1;
             }
         } else {
             if (iouringd_ring_submit_read_fixed(
@@ -3249,12 +3303,18 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                                (size_t)task->buffer_slot_index),
                     task->io_length,
                     task->submit_priority) != 0) {
+                int saved_errno = errno;
+
                 file_resource->in_flight -= 1u;
                 if (buffer_resource != NULL) {
                     buffer_resource->in_flight -= 1u;
                 }
                 iouringd_clear_task_slot(task);
-                return -1;
+                if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                    return -1;
+                }
+                iouringd_finish_client_request(client);
+                return 1;
             }
         }
 
@@ -3338,8 +3398,14 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                          task->task_id,
                                          &task->timeout,
                                          task->submit_priority) != 0) {
+            int saved_errno = errno;
+
             iouringd_clear_task_slot(task);
-            return -1;
+            if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                return -1;
+            }
+            iouringd_finish_client_request(client);
+            return 1;
         }
     } else if (task->task_kind == IOURINGD_TASK_KIND_CANCEL) {
         task->cancel_target_id = client->cancel_target_id;
@@ -3347,15 +3413,27 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                         task->task_id,
                                         task->cancel_target_id,
                                         task->submit_priority) != 0) {
+            int saved_errno = errno;
+
             iouringd_clear_task_slot(task);
-            return -1;
+            if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                return -1;
+            }
+            iouringd_finish_client_request(client);
+            return 1;
         }
     } else {
         if (iouringd_ring_submit_nop(&runtime->ring,
                                      task->task_id,
                                      task->submit_priority) != 0) {
+            int saved_errno = errno;
+
             iouringd_clear_task_slot(task);
-            return -1;
+            if (iouringd_reject_submit(runtime, client, -saved_errno) != 0) {
+                return -1;
+            }
+            iouringd_finish_client_request(client);
+            return 1;
         }
     }
 

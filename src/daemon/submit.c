@@ -952,6 +952,11 @@ int iouringd_ring_submit_accept(struct iouringd_ring *ring,
                                 unsigned accept_flags,
                                 uint16_t submit_priority)
 {
+    if (iouringd_test_fault_matches("submit_accept_einval") != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
     return ring_queue_accept_sqe(ring,
                                  task_id,
                                  fd,

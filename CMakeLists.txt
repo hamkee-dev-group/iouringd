@@ -203,6 +203,20 @@ add_test(
   COMMAND $<TARGET_FILE:register_accept_roundtrip> $<TARGET_FILE:iouringd_daemon>
 )
 
+add_executable(submit_accept_einval_rejected
+  tests/integration/submit_accept_einval_rejected.c
+)
+target_link_libraries(submit_accept_einval_rejected PRIVATE iouringd)
+target_include_directories(submit_accept_einval_rejected PRIVATE include)
+set_target_properties(submit_accept_einval_rejected PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
+
+add_test(
+  NAME submit_accept_einval_rejected
+  COMMAND $<TARGET_FILE:submit_accept_einval_rejected> $<TARGET_FILE:iouringd_daemon>
+)
+
 add_executable(register_poll_roundtrip
   tests/integration/register_poll_roundtrip.c
 )
@@ -634,6 +648,7 @@ foreach(daemon_integration_target
     openat_close_roundtrip
     register_connect_roundtrip
     register_accept_roundtrip
+    submit_accept_einval_rejected
     register_poll_roundtrip
     register_buffer_fixed_io_roundtrip
     config_stats_roundtrip

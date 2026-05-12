@@ -37,6 +37,7 @@ COMMANDS = [
     [test_bin("openat_close_roundtrip"), daemon_bin()],
     [test_bin("register_connect_roundtrip"), daemon_bin()],
     [test_bin("register_accept_roundtrip"), daemon_bin()],
+    [test_bin("submit_accept_einval_rejected"), daemon_bin()],
     [test_bin("register_poll_roundtrip"), daemon_bin()],
     [test_bin("register_buffer_fixed_io_roundtrip"), daemon_bin()],
     [test_bin("config_stats_roundtrip"), daemon_bin()],
