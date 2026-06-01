@@ -10,7 +10,7 @@ def test_bin(name: str) -> str:
 
 
 def daemon_bin() -> str:
-    return "./build/bin/iouringd"
+    return test_bin("iouringd_test_daemon")
 
 
 COMMANDS = [
