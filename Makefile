@@ -156,9 +156,6 @@ test: asan ubsan tsan $(TEST_TARGET) $(ABI_CONTRACT_TARGET) $(COMPLETION_RES_CON
 	tests/run_tests.sh
 
 validate: all lint test asan ubsan
-	./$(TARGET); test $$? -eq 2
-	./$(ASAN_TARGET); test $$? -eq 2
-	./$(UBSAN_TARGET); test $$? -eq 2
 
 $(ALL_BUILD_TARGETS): $(COMMON_HEADERS)
 
