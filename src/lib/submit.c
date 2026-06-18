@@ -9,6 +9,11 @@
 
 #include "iouringd/submit.h"
 
+#define IOURINGD_BUFFERED_PAYLOAD_MAX_PER_FD 256u
+#define IOURINGD_BUFFERED_COMPLETION_MAX_PER_FD 256u
+#define IOURINGD_BUFFERED_PAYLOAD_BYTES_PER_FD \
+    ((size_t)IOURINGD_BUFFERED_PAYLOAD_MAX_PER_FD * (size_t)UINT16_MAX)
+
 struct buffered_completion {
     int fd;
     struct iouringd_completion_record_v1 completion;
@@ -27,6 +32,128 @@ struct buffered_payload {
 
 static struct buffered_completion *buffered_completions;
 static struct buffered_payload *buffered_payloads;
+
+static size_t count_buffered_payloads_for_fd(int fd, size_t *bytes_out)
+{
+    struct buffered_payload *cursor;
+    size_t count = 0u;
+    size_t bytes = 0u;
+
+    for (cursor = buffered_payloads; cursor != NULL; cursor = cursor->next) {
+        if (cursor->fd == fd) {
+            count += 1u;
+            bytes += cursor->payload_length;
+        }
+    }
+
+    if (bytes_out != NULL) {
+        *bytes_out = bytes;
+    }
+    return count;
+}
+
+static size_t count_buffered_completions_for_fd(int fd)
+{
+    struct buffered_completion *cursor;
+    size_t count = 0u;
+
+    for (cursor = buffered_completions; cursor != NULL; cursor = cursor->next) {
+        if (cursor->fd == fd) {
+            count += 1u;
+        }
+    }
+    return count;
+}
+
+static struct buffered_payload *new_buffered_payload_entry(
+    int fd,
+    iouringd_task_id_t task_id,
+    size_t payload_length)
+{
+    struct buffered_payload *entry;
+    size_t bytes = 0u;
+    size_t count = count_buffered_payloads_for_fd(fd, &bytes);
+
+    if (count >= IOURINGD_BUFFERED_PAYLOAD_MAX_PER_FD ||
+        payload_length > IOURINGD_BUFFERED_PAYLOAD_BYTES_PER_FD - bytes) {
+        errno = ENOBUFS;
+        return NULL;
+    }
+
+    entry = malloc(sizeof(*entry));
+    if (entry == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    entry->fd = fd;
+    entry->task_id = task_id;
+    entry->payload_length = payload_length;
+    entry->payload = NULL;
+    entry->next = NULL;
+    return entry;
+}
+
+static void append_buffered_payload(struct buffered_payload *entry)
+{
+    if (buffered_payloads == NULL) {
+        buffered_payloads = entry;
+        return;
+    }
+
+    {
+        struct buffered_payload *tail = buffered_payloads;
+
+        while (tail->next != NULL) {
+            tail = tail->next;
+        }
+        tail->next = entry;
+    }
+}
+
+static struct buffered_completion *new_buffered_completion_entry(
+    int fd,
+    const struct iouringd_completion_record_v1 *completion,
+    size_t payload_length)
+{
+    struct buffered_completion *entry;
+
+    if (count_buffered_completions_for_fd(fd) >=
+        IOURINGD_BUFFERED_COMPLETION_MAX_PER_FD) {
+        errno = ENOBUFS;
+        return NULL;
+    }
+
+    entry = malloc(sizeof(*entry));
+    if (entry == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    entry->fd = fd;
+    entry->completion = *completion;
+    entry->payload_length = payload_length;
+    entry->payload = NULL;
+    entry->next = NULL;
+    return entry;
+}
+
+static void append_buffered_completion(struct buffered_completion *entry)
+{
+    if (buffered_completions == NULL) {
+        buffered_completions = entry;
+        return;
+    }
+
+    {
+        struct buffered_completion *tail = buffered_completions;
+
+        while (tail->next != NULL) {
+            tail = tail->next;
+        }
+        tail->next = entry;
+    }
+}
 
 static int socket_send_flags(void)
 {
@@ -305,79 +432,35 @@ static int peek_protocol_header(int fd,
     }
 }
 
-static int store_buffered_payload_owned(int fd,
-                                        iouringd_task_id_t task_id,
-                                        unsigned char *payload,
-                                        size_t payload_length)
+static int peek_completion_record(int fd,
+                                  struct iouringd_completion_record_v1 *completion)
 {
-    struct buffered_payload *entry;
+    for (;;) {
+        ssize_t rc = recv(fd,
+                          completion,
+                          sizeof(*completion),
+                          MSG_PEEK | MSG_WAITALL);
 
-    entry = malloc(sizeof(*entry));
-    if (entry == NULL) {
-        free(payload);
-        errno = ENOMEM;
+        if (rc < 0 && errno == EINTR) {
+            continue;
+        }
+
+        if (rc < 0) {
+            return -1;
+        }
+
+        if (rc == 0) {
+            errno = EPIPE;
+            return -1;
+        }
+
+        if ((size_t)rc == sizeof(*completion)) {
+            return 0;
+        }
+
+        errno = EPROTO;
         return -1;
     }
-
-    entry->fd = fd;
-    entry->task_id = task_id;
-    entry->payload_length = payload_length;
-    entry->payload = payload;
-    entry->next = NULL;
-
-    if (buffered_payloads == NULL) {
-        buffered_payloads = entry;
-        return 0;
-    }
-
-    {
-        struct buffered_payload *tail = buffered_payloads;
-
-        while (tail->next != NULL) {
-            tail = tail->next;
-        }
-        tail->next = entry;
-    }
-
-    return 0;
-}
-
-static int queue_buffered_completion(
-    int fd,
-    const struct iouringd_completion_record_v1 *completion,
-    unsigned char *payload,
-    size_t payload_length)
-{
-    struct buffered_completion *entry;
-
-    entry = malloc(sizeof(*entry));
-    if (entry == NULL) {
-        free(payload);
-        errno = ENOMEM;
-        return -1;
-    }
-
-    entry->fd = fd;
-    entry->completion = *completion;
-    entry->payload_length = payload_length;
-    entry->payload = payload;
-    entry->next = NULL;
-
-    if (buffered_completions == NULL) {
-        buffered_completions = entry;
-        return 0;
-    }
-
-    {
-        struct buffered_completion *tail = buffered_completions;
-
-        while (tail->next != NULL) {
-            tail = tail->next;
-        }
-        tail->next = entry;
-    }
-
-    return 0;
 }
 
 static int pop_buffered_completion(int fd,
@@ -388,24 +471,28 @@ static int pop_buffered_completion(int fd,
 
     while (current != NULL) {
         if (current->fd == fd) {
+            struct buffered_payload *new_entry = NULL;
+
+            if (current->payload_length != 0u) {
+                new_entry = new_buffered_payload_entry(
+                    fd,
+                    current->completion.task.task_id,
+                    current->payload_length);
+                if (new_entry == NULL) {
+                    return -1;
+                }
+            }
+
+            *completion = current->completion;
             if (previous == NULL) {
                 buffered_completions = current->next;
             } else {
                 previous->next = current->next;
             }
 
-            *completion = current->completion;
-            if (current->payload_length != 0u &&
-                store_buffered_payload_owned(fd,
-                                             current->completion.task.task_id,
-                                             current->payload,
-                                             current->payload_length) != 0) {
-                free(current);
-                return -1;
-            }
-
-            if (current->payload_length == 0u) {
-                free(current->payload);
+            if (new_entry != NULL) {
+                new_entry->payload = current->payload;
+                append_buffered_payload(new_entry);
             }
             free(current);
             return 1;
@@ -418,50 +505,15 @@ static int pop_buffered_completion(int fd,
     return 0;
 }
 
-static int read_completion_with_payload(int fd,
-                                        struct iouringd_completion_record_v1 *completion,
-                                        unsigned char **payload,
-                                        size_t *payload_length)
-{
-    *payload = NULL;
-    *payload_length = 0u;
-
-    if (read_full(fd, completion, sizeof(*completion)) != 0) {
-        return -1;
-    }
-
-    if (completion_record_is_valid(completion) == 0) {
-        errno = EPROTO;
-        return -1;
-    }
-
-    if (completion->payload_length == 0u) {
-        return 0;
-    }
-
-    *payload = malloc(completion->payload_length);
-    if (*payload == NULL) {
-        errno = ENOMEM;
-        return -1;
-    }
-
-    if (read_full(fd, *payload, completion->payload_length) != 0) {
-        free(*payload);
-        *payload = NULL;
-        return -1;
-    }
-
-    *payload_length = completion->payload_length;
-    return 0;
-}
-
 static int drain_completion_prefix(int fd)
 {
     for (;;) {
         struct iouringd_protocol_header_v1 header;
         struct iouringd_completion_record_v1 completion;
+        struct buffered_completion *new_entry;
         unsigned char *payload;
         size_t payload_length;
+        int saved_errno;
 
         if (peek_protocol_header(fd, &header) != 0) {
             return -1;
@@ -473,19 +525,51 @@ static int drain_completion_prefix(int fd)
             return 0;
         }
 
-        if (read_completion_with_payload(fd,
-                                         &completion,
-                                         &payload,
-                                         &payload_length) != 0) {
+        if (peek_completion_record(fd, &completion) != 0) {
             return -1;
         }
 
-        if (queue_buffered_completion(fd,
-                                      &completion,
-                                      payload,
-                                      payload_length) != 0) {
+        if (completion_record_is_valid(&completion) == 0) {
+            (void)read_full(fd, &completion, sizeof(completion));
+            errno = EPROTO;
             return -1;
         }
+
+        payload_length = completion.payload_length;
+        new_entry = new_buffered_completion_entry(fd, &completion, payload_length);
+        if (new_entry == NULL) {
+            return -1;
+        }
+
+        payload = NULL;
+        if (payload_length != 0u) {
+            payload = malloc(payload_length);
+            if (payload == NULL) {
+                free(new_entry);
+                errno = ENOMEM;
+                return -1;
+            }
+        }
+
+        if (read_full(fd, &completion, sizeof(completion)) != 0) {
+            saved_errno = errno;
+            free(payload);
+            free(new_entry);
+            errno = saved_errno;
+            return -1;
+        }
+
+        if (payload_length != 0u &&
+            read_full(fd, payload, payload_length) != 0) {
+            saved_errno = errno;
+            free(payload);
+            free(new_entry);
+            errno = saved_errno;
+            return -1;
+        }
+
+        new_entry->payload = payload;
+        append_buffered_completion(new_entry);
     }
 }
 
@@ -1531,8 +1615,10 @@ int iouringd_wait_completion(int fd,
                              struct iouringd_completion_record_v1 *completion)
 {
     int buffered;
+    struct buffered_payload *new_entry;
     unsigned char *payload;
     size_t payload_length;
+    int saved_errno;
 
     if (fd < 0 || completion == NULL) {
         errno = EINVAL;
@@ -1544,22 +1630,53 @@ int iouringd_wait_completion(int fd,
         return buffered < 0 ? -1 : 0;
     }
 
-    if (read_completion_with_payload(fd, completion, &payload, &payload_length) != 0) {
+    if (peek_completion_record(fd, completion) != 0) {
         return -1;
     }
 
-    if (payload_length != 0u &&
-        store_buffered_payload_owned(fd,
-                                     completion->task.task_id,
-                                     payload,
-                                     payload_length) != 0) {
+    if (completion_record_is_valid(completion) == 0) {
+        (void)read_full(fd, completion, sizeof(*completion));
+        errno = EPROTO;
         return -1;
     }
 
-    if (payload_length == 0u) {
+    if (completion->payload_length == 0u) {
+        return read_full(fd, completion, sizeof(*completion));
+    }
+
+    payload_length = completion->payload_length;
+    new_entry = new_buffered_payload_entry(fd,
+                                           completion->task.task_id,
+                                           payload_length);
+    if (new_entry == NULL) {
+        return -1;
+    }
+
+    payload = malloc(payload_length);
+    if (payload == NULL) {
+        free(new_entry);
+        errno = ENOMEM;
+        return -1;
+    }
+
+    if (read_full(fd, completion, sizeof(*completion)) != 0) {
+        saved_errno = errno;
         free(payload);
+        free(new_entry);
+        errno = saved_errno;
+        return -1;
     }
 
+    if (read_full(fd, payload, payload_length) != 0) {
+        saved_errno = errno;
+        free(payload);
+        free(new_entry);
+        errno = saved_errno;
+        return -1;
+    }
+
+    new_entry->payload = payload;
+    append_buffered_payload(new_entry);
     return 0;
 }
 

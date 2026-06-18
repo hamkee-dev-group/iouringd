@@ -749,6 +749,82 @@ static int exercise_submit_close_result(
     return rc;
 }
 
+static int exercise_completion_prefix_overflow(void)
+{
+    struct iouringd_submit_request_v1 request;
+    struct iouringd_submit_result_v1 result;
+    int fds[2];
+    pid_t child;
+    int status;
+    int rc;
+    int saved_errno;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        return -1;
+    }
+
+    child = fork();
+    if (child < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+
+    if (child == 0) {
+        struct iouringd_completion_record_v1 completion;
+        struct iouringd_submit_result_v1 wire_result;
+        unsigned int index;
+
+        close(fds[0]);
+        memset(&request, 0, sizeof(request));
+        if (read_full(fds[1], &request, sizeof(request)) != 0) {
+            close(fds[1]);
+            _exit(1);
+        }
+
+        memset(&completion, 0, sizeof(completion));
+        completion.header.magic = IOURINGD_PROTOCOL_WIRE_MAGIC;
+        completion.header.version_major = IOURINGD_PROTOCOL_V1_MAJOR;
+        completion.header.version_minor = IOURINGD_PROTOCOL_V1_MINOR;
+        completion.task.task_id = UINT64_C(1);
+        completion.res = IOURINGD_COMPLETION_RES_OK;
+        completion.task_kind.value = IOURINGD_TASK_KIND_NOP;
+        completion.payload_length = 0u;
+
+        for (index = 0; index < 300u; ++index) {
+            if (write_full(fds[1], &completion, sizeof(completion)) != 0) {
+                close(fds[1]);
+                _exit(0);
+            }
+        }
+
+        memset(&wire_result, 0, sizeof(wire_result));
+        wire_result.task.task_id = UINT64_C(2);
+        wire_result.res = IOURINGD_COMPLETION_RES_OK;
+        (void)write_full(fds[1], &wire_result, sizeof(wire_result));
+
+        close(fds[1]);
+        _exit(0);
+    }
+
+    close(fds[1]);
+    errno = 0;
+    memset(&result, 0, sizeof(result));
+    rc = iouringd_submit_nop_result(fds[0], &result);
+    saved_errno = errno;
+    close(fds[0]);
+
+    if (waitpid(child, &status, 0) != child) {
+        return -1;
+    }
+
+    if (rc != -1 || saved_errno != ENOBUFS) {
+        return -1;
+    }
+
+    return 0;
+}
+
 static void init_accept(struct iouringd_submit_result_v1 *result,
                         iouringd_task_id_t task_id,
                         uint32_t credits)
@@ -907,6 +983,10 @@ int main(void)
     wire_result.credits = 1u;
     if (exercise_submit_cancel_result(&wire_result, &client_result) != -1 ||
         errno != EPROTO) {
+        return 1;
+    }
+
+    if (exercise_completion_prefix_overflow() != 0) {
         return 1;
     }
 
