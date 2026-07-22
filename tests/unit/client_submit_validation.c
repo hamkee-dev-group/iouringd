@@ -825,6 +825,126 @@ static int exercise_completion_prefix_overflow(void)
     return 0;
 }
 
+static int exercise_release_before_fd_reuse(void)
+{
+    struct iouringd_submit_request_v1 request;
+    struct iouringd_submit_result_v1 result;
+    struct iouringd_completion_record_v1 completion;
+    int fds[2];
+    int new_fds[2];
+    int old_fd;
+    pid_t child;
+    int status;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        return -1;
+    }
+
+    child = fork();
+    if (child < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+
+    if (child == 0) {
+        struct iouringd_completion_record_v1 prefix;
+        struct iouringd_submit_result_v1 wire_result;
+
+        close(fds[0]);
+        memset(&request, 0, sizeof(request));
+        if (read_full(fds[1], &request, sizeof(request)) != 0) {
+            close(fds[1]);
+            _exit(1);
+        }
+
+        memset(&prefix, 0, sizeof(prefix));
+        prefix.header.magic = IOURINGD_PROTOCOL_WIRE_MAGIC;
+        prefix.header.version_major = IOURINGD_PROTOCOL_V1_MAJOR;
+        prefix.header.version_minor = IOURINGD_PROTOCOL_V1_MINOR;
+        prefix.task.task_id = UINT64_C(42);
+        prefix.res = IOURINGD_COMPLETION_RES_OK;
+        prefix.task_kind.value = IOURINGD_TASK_KIND_NOP;
+        prefix.payload_length = 0u;
+
+        memset(&wire_result, 0, sizeof(wire_result));
+        wire_result.task.task_id = UINT64_C(1);
+        wire_result.res = IOURINGD_COMPLETION_RES_OK;
+
+        if (write_full(fds[1], &prefix, sizeof(prefix)) != 0 ||
+            write_full(fds[1], &wire_result, sizeof(wire_result)) != 0) {
+            close(fds[1]);
+            _exit(1);
+        }
+
+        close(fds[1]);
+        _exit(0);
+    }
+
+    old_fd = fds[0];
+
+    /* Buffers the task 42 completion prefix before returning the submit result. */
+    errno = 0;
+    memset(&result, 0, sizeof(result));
+    if (iouringd_submit_nop_result(fds[0], &result) != 0 ||
+        result.task.task_id != UINT64_C(1) ||
+        iouringd_release_client(fds[0]) != 0) {
+        close(fds[0]);
+        close(fds[1]);
+        waitpid(child, &status, 0);
+        return -1;
+    }
+
+    close(fds[1]);
+    close(fds[0]);
+
+    if (waitpid(child, &status, 0) != child ||
+        !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return -1;
+    }
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, new_fds) != 0) {
+        return -1;
+    }
+
+    if (new_fds[0] != old_fd) {
+        close(new_fds[0]);
+        close(new_fds[1]);
+        return -1;
+    }
+
+    /*
+     * The reused descriptor must not surface the released task 42 completion;
+     * wait_completion should read the fresh task 7 record off the socket.
+     */
+    memset(&completion, 0, sizeof(completion));
+    completion.header.magic = IOURINGD_PROTOCOL_WIRE_MAGIC;
+    completion.header.version_major = IOURINGD_PROTOCOL_V1_MAJOR;
+    completion.header.version_minor = IOURINGD_PROTOCOL_V1_MINOR;
+    completion.task.task_id = UINT64_C(7);
+    completion.res = IOURINGD_COMPLETION_RES_OK;
+    completion.task_kind.value = IOURINGD_TASK_KIND_NOP;
+    completion.payload_length = 0u;
+
+    if (write_full(new_fds[1], &completion, sizeof(completion)) != 0) {
+        close(new_fds[0]);
+        close(new_fds[1]);
+        return -1;
+    }
+
+    memset(&completion, 0, sizeof(completion));
+    if (iouringd_wait_completion(new_fds[0], &completion) != 0 ||
+        completion.task.task_id != UINT64_C(7)) {
+        close(new_fds[0]);
+        close(new_fds[1]);
+        return -1;
+    }
+
+    close(new_fds[0]);
+    close(new_fds[1]);
+    return 0;
+}
+
 static void init_accept(struct iouringd_submit_result_v1 *result,
                         iouringd_task_id_t task_id,
                         uint32_t credits)
@@ -983,6 +1103,10 @@ int main(void)
     wire_result.credits = 1u;
     if (exercise_submit_cancel_result(&wire_result, &client_result) != -1 ||
         errno != EPROTO) {
+        return 1;
+    }
+
+    if (exercise_release_before_fd_reuse() != 0) {
         return 1;
     }
 

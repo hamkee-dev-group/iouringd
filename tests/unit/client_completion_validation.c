@@ -83,6 +83,95 @@ static void init_valid_completion(struct iouringd_completion_record_v1 *completi
     completion->task_kind.value = IOURINGD_TASK_KIND_NOP;
 }
 
+static int exercise_release_before_fd_reuse(void)
+{
+    struct iouringd_completion_record_v1 completion;
+    unsigned char payload[8];
+    size_t payload_length;
+    int fds[2];
+    int new_fds[2];
+    int old_fd;
+    pid_t child;
+    int status;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        return -1;
+    }
+
+    child = fork();
+    if (child < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+
+    if (child == 0) {
+        static const unsigned char old_payload[] = {'o', 'l', 'd'};
+        struct iouringd_completion_record_v1 record;
+
+        close(fds[0]);
+        init_valid_completion(&record);
+        record.task_kind.value = IOURINGD_TASK_KIND_SOCK_READ;
+        record.res = 3;
+        record.payload_length = 3;
+
+        if (write_full(fds[1], &record, sizeof(record)) != 0 ||
+            write_full(fds[1], old_payload, sizeof(old_payload)) != 0) {
+            close(fds[1]);
+            _exit(1);
+        }
+
+        close(fds[1]);
+        _exit(0);
+    }
+
+    old_fd = fds[0];
+
+    /* Buffer the SOCK_READ payload for task 1 but leave it unread. */
+    if (iouringd_wait_completion(fds[0], &completion) != 0 ||
+        iouringd_release_client(fds[0]) != 0) {
+        close(fds[0]);
+        close(fds[1]);
+        waitpid(child, &status, 0);
+        return -1;
+    }
+
+    close(fds[1]);
+    close(fds[0]);
+
+    if (waitpid(child, &status, 0) != child ||
+        !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return -1;
+    }
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, new_fds) != 0) {
+        return -1;
+    }
+
+    if (new_fds[0] != old_fd) {
+        close(new_fds[0]);
+        close(new_fds[1]);
+        return -1;
+    }
+
+    /* The reused descriptor must not inherit task 1's released payload. */
+    errno = 0;
+    if (iouringd_read_completion_payload(new_fds[0],
+                                         &completion,
+                                         payload,
+                                         sizeof(payload),
+                                         &payload_length) != -1 ||
+        errno != EPROTO) {
+        close(new_fds[0]);
+        close(new_fds[1]);
+        return -1;
+    }
+
+    close(new_fds[0]);
+    close(new_fds[1]);
+    return 0;
+}
+
 int main(void)
 {
     struct iouringd_completion_record_v1 completion;
@@ -170,6 +259,10 @@ int main(void)
     completion.header.version_minor =
         (uint16_t)(IOURINGD_PROTOCOL_V1_MINOR + 1u);
     if (exercise_completion(&completion) != -1 || errno != EPROTO) {
+        return 1;
+    }
+
+    if (exercise_release_before_fd_reuse() != 0) {
         return 1;
     }
 

@@ -1735,3 +1735,35 @@ int iouringd_read_completion_payload(int fd,
     errno = EPROTO;
     return -1;
 }
+
+int iouringd_release_client(int fd)
+{
+    struct buffered_completion **completion_link = &buffered_completions;
+    struct buffered_payload **payload_link = &buffered_payloads;
+
+    while (*completion_link != NULL) {
+        struct buffered_completion *current = *completion_link;
+
+        if (current->fd == fd) {
+            *completion_link = current->next;
+            free(current->payload);
+            free(current);
+        } else {
+            completion_link = &current->next;
+        }
+    }
+
+    while (*payload_link != NULL) {
+        struct buffered_payload *current = *payload_link;
+
+        if (current->fd == fd) {
+            *payload_link = current->next;
+            free(current->payload);
+            free(current);
+        } else {
+            payload_link = &current->next;
+        }
+    }
+
+    return 0;
+}

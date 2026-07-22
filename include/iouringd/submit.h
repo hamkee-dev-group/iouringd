@@ -165,4 +165,11 @@ int iouringd_read_completion_payload(int fd,
                                      size_t buf_capacity,
                                      size_t *payload_length);
 
+/*
+ * Free every buffered completion and payload associated with fd. Callers MUST
+ * invoke this before close() so that a descriptor number the kernel later
+ * reuses cannot inherit a previous owner's buffered state. Always returns 0.
+ */
+int iouringd_release_client(int fd);
+
 #endif
