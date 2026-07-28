@@ -1274,6 +1274,7 @@ static int iouringd_queue_handshake_result(
     const struct iouringd_handshake_request_v1 *request)
 {
     struct iouringd_handshake_result_v1 result;
+    int received_fd_seen = (client->received_fd >= 0);
 
     memset(&result, 0, sizeof(result));
     result.response.header.magic = IOURINGD_PROTOCOL_WIRE_MAGIC;
@@ -1283,12 +1284,18 @@ static int iouringd_queue_handshake_result(
     result.response.abi_minor = IOURINGD_ABI_V1_MINOR;
     result.response.status = IOURINGD_HANDSHAKE_STATUS_ACCEPT;
 
+    if (client->received_fd >= 0) {
+        close(client->received_fd);
+        client->received_fd = -1;
+    }
+
     if (request->header.magic != IOURINGD_PROTOCOL_WIRE_MAGIC ||
         request->header.version_major != IOURINGD_PROTOCOL_V1_MAJOR ||
         request->header.version_minor != IOURINGD_PROTOCOL_V1_MINOR ||
         request->abi_major != IOURINGD_ABI_V1_MAJOR ||
         request->abi_minor != IOURINGD_ABI_V1_MINOR ||
-        request->reserved != 0u) {
+        request->reserved != 0u ||
+        received_fd_seen != 0) {
         result.response.status = IOURINGD_HANDSHAKE_STATUS_REJECT;
         client->close_after_flush = 1;
     } else {

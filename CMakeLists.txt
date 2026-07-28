@@ -217,6 +217,20 @@ add_test(
   COMMAND $<TARGET_FILE:submit_accept_einval_rejected> $<TARGET_FILE:iouringd_daemon>
 )
 
+add_executable(handshake_scm_rights_rejected
+  tests/integration/handshake_scm_rights_rejected.c
+)
+target_link_libraries(handshake_scm_rights_rejected PRIVATE iouringd)
+target_include_directories(handshake_scm_rights_rejected PRIVATE include)
+set_target_properties(handshake_scm_rights_rejected PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
+
+add_test(
+  NAME handshake_scm_rights_rejected
+  COMMAND $<TARGET_FILE:handshake_scm_rights_rejected> $<TARGET_FILE:iouringd_daemon>
+)
+
 add_executable(register_poll_roundtrip
   tests/integration/register_poll_roundtrip.c
 )
@@ -649,6 +663,7 @@ foreach(daemon_integration_target
     register_connect_roundtrip
     register_accept_roundtrip
     submit_accept_einval_rejected
+    handshake_scm_rights_rejected
     register_poll_roundtrip
     register_buffer_fixed_io_roundtrip
     config_stats_roundtrip
