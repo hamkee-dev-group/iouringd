@@ -122,6 +122,66 @@ static uint16_t sqe_ioprio_from_submit_priority(uint16_t submit_priority)
     return 0u;
 }
 
+static unsigned ring_pending_submissions(const struct iouringd_ring *ring)
+{
+    return *ring->sq_tail - load_acquire(ring->sq_head);
+}
+
+static int ring_enter_fault_active(unsigned pending)
+{
+    static int single_fault_consumed;
+
+    if (pending != 1u) {
+        return 0;
+    }
+
+    if (iouringd_test_fault_matches("enter_after_publish") != 0) {
+        return 1;
+    }
+
+    if (single_fault_consumed == 0 &&
+        iouringd_test_fault_matches("enter_after_publish_once") != 0) {
+        single_fault_consumed = 1;
+        return 1;
+    }
+
+    return 0;
+}
+
+static int ring_enter_submit(struct iouringd_ring *ring)
+{
+    unsigned pending = ring_pending_submissions(ring);
+
+    if (pending == 0u) {
+        return 0;
+    }
+
+    if (ring_enter_fault_active(pending) != 0) {
+        errno = EAGAIN;
+        return -1;
+    }
+
+    if (syscall(__NR_io_uring_enter, ring->ring_fd, pending, 0u, 0u, NULL) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int ring_publish_and_submit(struct iouringd_ring *ring,
+                                   unsigned sq_tail,
+                                   unsigned sq_index)
+{
+    ring->sq_array[sq_index] = sq_index;
+    store_release(ring->sq_tail, sq_tail + 1u);
+
+    if (ring_enter_submit(ring) != 0) {
+        return IOURINGD_SUBMIT_PUBLISHED;
+    }
+
+    return IOURINGD_SUBMIT_OK;
+}
+
 static int ring_queue_sqe(struct iouringd_ring *ring,
                           uint8_t opcode,
                           iouringd_task_id_t task_id,
@@ -136,7 +196,7 @@ static int ring_queue_sqe(struct iouringd_ring *ring,
 
     if (ring == NULL || ring->ring_fd < 0) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
     (void)submit_priority;
 
@@ -144,7 +204,7 @@ static int ring_queue_sqe(struct iouringd_ring *ring,
     sq_tail = *ring->sq_tail;
     if ((sq_tail - sq_head) >= *ring->sq_ring_entries) {
         errno = EBUSY;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_index = sq_tail & *ring->sq_ring_mask;
@@ -154,14 +214,7 @@ static int ring_queue_sqe(struct iouringd_ring *ring,
     sqe->user_data = task_id;
     sqe->addr = addr;
     sqe->len = len;
-    ring->sq_array[sq_index] = sq_index;
-    store_release(ring->sq_tail, sq_tail + 1u);
-
-    if (syscall(__NR_io_uring_enter, ring->ring_fd, 1u, 0u, 0u, NULL) < 0) {
-        return -1;
-    }
-
-    return 0;
+    return ring_publish_and_submit(ring, sq_tail, sq_index);
 }
 
 static int ring_queue_rw_sqe(struct iouringd_ring *ring,
@@ -180,14 +233,14 @@ static int ring_queue_rw_sqe(struct iouringd_ring *ring,
     if (ring == NULL || ring->ring_fd < 0 || iov == NULL || iovcnt == 0u ||
         file_index >= ring->registered_files_count) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_head = load_acquire(ring->sq_head);
     sq_tail = *ring->sq_tail;
     if ((sq_tail - sq_head) >= *ring->sq_ring_entries) {
         errno = EBUSY;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_index = sq_tail & *ring->sq_ring_mask;
@@ -200,14 +253,7 @@ static int ring_queue_rw_sqe(struct iouringd_ring *ring,
     sqe->addr = (uint64_t)(uintptr_t)iov;
     sqe->len = iovcnt;
     sqe->ioprio = sqe_ioprio_from_submit_priority(submit_priority);
-    ring->sq_array[sq_index] = sq_index;
-    store_release(ring->sq_tail, sq_tail + 1u);
-
-    if (syscall(__NR_io_uring_enter, ring->ring_fd, 1u, 0u, 0u, NULL) < 0) {
-        return -1;
-    }
-
-    return 0;
+    return ring_publish_and_submit(ring, sq_tail, sq_index);
 }
 
 static int ring_queue_fixed_buffer_sqe(struct iouringd_ring *ring,
@@ -228,14 +274,14 @@ static int ring_queue_fixed_buffer_sqe(struct iouringd_ring *ring,
         file_index >= ring->registered_files_count ||
         buffer_index >= ring->registered_buffers_count) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_head = load_acquire(ring->sq_head);
     sq_tail = *ring->sq_tail;
     if ((sq_tail - sq_head) >= *ring->sq_ring_entries) {
         errno = EBUSY;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_index = sq_tail & *ring->sq_ring_mask;
@@ -249,14 +295,7 @@ static int ring_queue_fixed_buffer_sqe(struct iouringd_ring *ring,
     sqe->len = len;
     sqe->buf_index = (uint16_t)buffer_index;
     sqe->ioprio = sqe_ioprio_from_submit_priority(submit_priority);
-    ring->sq_array[sq_index] = sq_index;
-    store_release(ring->sq_tail, sq_tail + 1u);
-
-    if (syscall(__NR_io_uring_enter, ring->ring_fd, 1u, 0u, 0u, NULL) < 0) {
-        return -1;
-    }
-
-    return 0;
+    return ring_publish_and_submit(ring, sq_tail, sq_index);
 }
 
 static int ring_queue_poll_sqe(struct iouringd_ring *ring,
@@ -273,7 +312,7 @@ static int ring_queue_poll_sqe(struct iouringd_ring *ring,
     if (ring == NULL || ring->ring_fd < 0 || poll_mask == 0u ||
         file_index >= ring->registered_files_count) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
     (void)submit_priority;
 
@@ -281,7 +320,7 @@ static int ring_queue_poll_sqe(struct iouringd_ring *ring,
     sq_tail = *ring->sq_tail;
     if ((sq_tail - sq_head) >= *ring->sq_ring_entries) {
         errno = EBUSY;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_index = sq_tail & *ring->sq_ring_mask;
@@ -292,14 +331,7 @@ static int ring_queue_poll_sqe(struct iouringd_ring *ring,
     sqe->fd = (int)file_index;
     sqe->flags = IOSQE_FIXED_FILE;
     sqe->poll_events = poll_mask;
-    ring->sq_array[sq_index] = sq_index;
-    store_release(ring->sq_tail, sq_tail + 1u);
-
-    if (syscall(__NR_io_uring_enter, ring->ring_fd, 1u, 0u, 0u, NULL) < 0) {
-        return -1;
-    }
-
-    return 0;
+    return ring_publish_and_submit(ring, sq_tail, sq_index);
 }
 
 static int ring_queue_connect_sqe(struct iouringd_ring *ring,
@@ -317,7 +349,7 @@ static int ring_queue_connect_sqe(struct iouringd_ring *ring,
     if (ring == NULL || ring->ring_fd < 0 || sockaddr_buf == NULL ||
         sockaddr_length == 0u || sockaddr_length > UINT16_MAX || fd < 0) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
     (void)submit_priority;
 
@@ -325,7 +357,7 @@ static int ring_queue_connect_sqe(struct iouringd_ring *ring,
     sq_tail = *ring->sq_tail;
     if ((sq_tail - sq_head) >= *ring->sq_ring_entries) {
         errno = EBUSY;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_index = sq_tail & *ring->sq_ring_mask;
@@ -337,14 +369,7 @@ static int ring_queue_connect_sqe(struct iouringd_ring *ring,
     sqe->addr = (uint64_t)(uintptr_t)sockaddr_buf;
     sqe->off = sockaddr_length;
     sqe->len = 0u;
-    ring->sq_array[sq_index] = sq_index;
-    store_release(ring->sq_tail, sq_tail + 1u);
-
-    if (syscall(__NR_io_uring_enter, ring->ring_fd, 1u, 0u, 0u, NULL) < 0) {
-        return -1;
-    }
-
-    return 0;
+    return ring_publish_and_submit(ring, sq_tail, sq_index);
 }
 
 static int ring_queue_accept_sqe(struct iouringd_ring *ring,
@@ -362,20 +387,20 @@ static int ring_queue_accept_sqe(struct iouringd_ring *ring,
 
     if (ring == NULL || ring->ring_fd < 0 || fd < 0) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
     (void)submit_priority;
 
     if ((sockaddr_buf == NULL) != (sockaddr_length == NULL)) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_head = load_acquire(ring->sq_head);
     sq_tail = *ring->sq_tail;
     if ((sq_tail - sq_head) >= *ring->sq_ring_entries) {
         errno = EBUSY;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_index = sq_tail & *ring->sq_ring_mask;
@@ -387,14 +412,7 @@ static int ring_queue_accept_sqe(struct iouringd_ring *ring,
     sqe->addr = (uint64_t)(uintptr_t)sockaddr_buf;
     sqe->off = (uint64_t)(uintptr_t)sockaddr_length;
     sqe->accept_flags = accept_flags;
-    ring->sq_array[sq_index] = sq_index;
-    store_release(ring->sq_tail, sq_tail + 1u);
-
-    if (syscall(__NR_io_uring_enter, ring->ring_fd, 1u, 0u, 0u, NULL) < 0) {
-        return -1;
-    }
-
-    return 0;
+    return ring_publish_and_submit(ring, sq_tail, sq_index);
 }
 
 static int ring_queue_openat_sqe(struct iouringd_ring *ring,
@@ -412,14 +430,14 @@ static int ring_queue_openat_sqe(struct iouringd_ring *ring,
 
     if (ring == NULL || ring->ring_fd < 0 || path == NULL) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_head = load_acquire(ring->sq_head);
     sq_tail = *ring->sq_tail;
     if ((sq_tail - sq_head) >= *ring->sq_ring_entries) {
         errno = EBUSY;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_index = sq_tail & *ring->sq_ring_mask;
@@ -432,14 +450,7 @@ static int ring_queue_openat_sqe(struct iouringd_ring *ring,
     sqe->open_flags = (uint32_t)open_flags;
     sqe->len = open_mode;
     sqe->ioprio = sqe_ioprio_from_submit_priority(submit_priority);
-    ring->sq_array[sq_index] = sq_index;
-    store_release(ring->sq_tail, sq_tail + 1u);
-
-    if (syscall(__NR_io_uring_enter, ring->ring_fd, 1u, 0u, 0u, NULL) < 0) {
-        return -1;
-    }
-
-    return 0;
+    return ring_publish_and_submit(ring, sq_tail, sq_index);
 }
 
 static int ring_queue_close_sqe(struct iouringd_ring *ring,
@@ -454,14 +465,14 @@ static int ring_queue_close_sqe(struct iouringd_ring *ring,
 
     if (ring == NULL || ring->ring_fd < 0 || fd < 0) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_head = load_acquire(ring->sq_head);
     sq_tail = *ring->sq_tail;
     if ((sq_tail - sq_head) >= *ring->sq_ring_entries) {
         errno = EBUSY;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_index = sq_tail & *ring->sq_ring_mask;
@@ -471,14 +482,7 @@ static int ring_queue_close_sqe(struct iouringd_ring *ring,
     sqe->user_data = task_id;
     sqe->fd = fd;
     sqe->ioprio = sqe_ioprio_from_submit_priority(submit_priority);
-    ring->sq_array[sq_index] = sq_index;
-    store_release(ring->sq_tail, sq_tail + 1u);
-
-    if (syscall(__NR_io_uring_enter, ring->ring_fd, 1u, 0u, 0u, NULL) < 0) {
-        return -1;
-    }
-
-    return 0;
+    return ring_publish_and_submit(ring, sq_tail, sq_index);
 }
 
 int iouringd_ring_init(struct iouringd_ring *ring,
@@ -820,6 +824,26 @@ unsigned iouringd_ring_capacity(const struct iouringd_ring *ring)
     return *ring->sq_ring_entries;
 }
 
+unsigned iouringd_ring_pending_submissions(const struct iouringd_ring *ring)
+{
+    if (ring == NULL || ring->sq_head == NULL || ring->sq_tail == NULL) {
+        return 0u;
+    }
+
+    return ring_pending_submissions(ring);
+}
+
+int iouringd_ring_flush_submissions(struct iouringd_ring *ring)
+{
+    if (ring == NULL || ring->ring_fd < 0 || ring->sq_head == NULL ||
+        ring->sq_tail == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    return ring_enter_submit(ring);
+}
+
 int iouringd_ring_submit_nop(struct iouringd_ring *ring,
                              iouringd_task_id_t task_id,
                              uint16_t submit_priority)
@@ -835,7 +859,7 @@ int iouringd_ring_submit_timeout(
 {
     if (timeout == NULL) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     return ring_queue_sqe(ring,
@@ -860,7 +884,7 @@ int iouringd_ring_submit_cancel(struct iouringd_ring *ring,
         target_task_id == IOURINGD_TASK_ID_INVALID ||
         target_task_id >= IOURINGD_TASK_ID_RESERVED_MIN) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
     (void)submit_priority;
 
@@ -868,7 +892,7 @@ int iouringd_ring_submit_cancel(struct iouringd_ring *ring,
     sq_tail = *ring->sq_tail;
     if ((sq_tail - sq_head) >= *ring->sq_ring_entries) {
         errno = EBUSY;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     sq_index = sq_tail & *ring->sq_ring_mask;
@@ -878,14 +902,7 @@ int iouringd_ring_submit_cancel(struct iouringd_ring *ring,
     sqe->user_data = task_id;
     sqe->addr = (uint64_t)target_task_id;
     sqe->cancel_flags = IORING_ASYNC_CANCEL_USERDATA;
-    ring->sq_array[sq_index] = sq_index;
-    store_release(ring->sq_tail, sq_tail + 1u);
-
-    if (syscall(__NR_io_uring_enter, ring->ring_fd, 1u, 0u, 0u, NULL) < 0) {
-        return -1;
-    }
-
-    return 0;
+    return ring_publish_and_submit(ring, sq_tail, sq_index);
 }
 
 int iouringd_ring_submit_readv(struct iouringd_ring *ring,
@@ -954,7 +971,7 @@ int iouringd_ring_submit_accept(struct iouringd_ring *ring,
 {
     if (iouringd_test_fault_matches("submit_accept_einval") != 0) {
         errno = EINVAL;
-        return -1;
+        return IOURINGD_SUBMIT_FAILED;
     }
 
     return ring_queue_accept_sqe(ring,

@@ -30,6 +30,7 @@
 #define IOURINGD_MAX_IO_BYTES 4096
 #define IOURINGD_TRACE_CAPACITY 256u
 #define IOURINGD_DEFAULT_RING_ENTRIES 4u
+#define IOURINGD_SUBMIT_RETRY_MS 10
 #define IOURINGD_MAX_REQUEST_BYTES                                             \
     (sizeof(struct iouringd_register_buffer_request_v1) + IOURINGD_MAX_IO_BYTES)
 
@@ -2837,7 +2838,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                         (const char *)task->io_buffer,
                                         task->open_flags,
                                         task->open_mode,
-                                        task->submit_priority) != 0) {
+                                        task->submit_priority) < 0) {
             int saved_errno = errno;
 
             if (result_file_resource->in_flight != 0u) {
@@ -2957,7 +2958,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
         if (iouringd_ring_submit_close(&runtime->ring,
                                        task->task_id,
                                        close_fd,
-                                       task->submit_priority) != 0) {
+                                       task->submit_priority) < 0) {
             int saved_errno = errno;
 
             file_resource->daemon_fd = close_fd;
@@ -3179,7 +3180,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                                                        file_slot_index),
                                             &task->io_vector,
                                             1u,
-                                            task->submit_priority) != 0) {
+                                            task->submit_priority) < 0) {
                 int saved_errno = errno;
 
                 file_resource->in_flight -= 1u;
@@ -3199,7 +3200,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                                                       file_slot_index),
                                            &task->io_vector,
                                            1u,
-                                           task->submit_priority) != 0) {
+                                           task->submit_priority) < 0) {
                 int saved_errno = errno;
 
                 file_resource->in_flight -= 1u;
@@ -3217,7 +3218,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                              file_resource->daemon_fd,
                                              task->io_buffer,
                                              task->io_length,
-                                             task->submit_priority) != 0) {
+                                             task->submit_priority) < 0) {
                 int saved_errno = errno;
 
                 file_resource->in_flight -= 1u;
@@ -3235,7 +3236,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                             task->io_length != 0u ? task->io_buffer : NULL,
                                             task->io_length != 0u ? &task->sockaddr_length : NULL,
                                             SOCK_CLOEXEC | SOCK_NONBLOCK,
-                                            task->submit_priority) != 0) {
+                                            task->submit_priority) < 0) {
                 struct iouringd_resource_slot *result_file_resource =
                     &client->file_resources[task->result_file_slot_index];
                 int saved_errno = errno;
@@ -3260,7 +3261,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                                                      client_index,
                                                                      file_slot_index),
                                           task->poll_mask,
-                                          task->submit_priority) != 0) {
+                                          task->submit_priority) < 0) {
                 int saved_errno = errno;
 
                 file_resource->in_flight -= 1u;
@@ -3283,7 +3284,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                                client_index,
                                                (size_t)task->buffer_slot_index),
                     task->io_length,
-                    task->submit_priority) != 0) {
+                    task->submit_priority) < 0) {
                 int saved_errno = errno;
 
                 file_resource->in_flight -= 1u;
@@ -3309,7 +3310,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
                                                client_index,
                                                (size_t)task->buffer_slot_index),
                     task->io_length,
-                    task->submit_priority) != 0) {
+                    task->submit_priority) < 0) {
                 int saved_errno = errno;
 
                 file_resource->in_flight -= 1u;
@@ -3404,7 +3405,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
         if (iouringd_ring_submit_timeout(&runtime->ring,
                                          task->task_id,
                                          &task->timeout,
-                                         task->submit_priority) != 0) {
+                                         task->submit_priority) < 0) {
             int saved_errno = errno;
 
             iouringd_clear_task_slot(task);
@@ -3419,7 +3420,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
         if (iouringd_ring_submit_cancel(&runtime->ring,
                                         task->task_id,
                                         task->cancel_target_id,
-                                        task->submit_priority) != 0) {
+                                        task->submit_priority) < 0) {
             int saved_errno = errno;
 
             iouringd_clear_task_slot(task);
@@ -3432,7 +3433,7 @@ static int iouringd_dispatch_client_request(struct iouringd_runtime *runtime,
     } else {
         if (iouringd_ring_submit_nop(&runtime->ring,
                                      task->task_id,
-                                     task->submit_priority) != 0) {
+                                     task->submit_priority) < 0) {
             int saved_errno = errno;
 
             iouringd_clear_task_slot(task);
@@ -3871,6 +3872,19 @@ static int iouringd_sweep_closing_resources(struct iouringd_runtime *runtime)
     return progress;
 }
 
+static int iouringd_flush_pending_submissions(struct iouringd_runtime *runtime)
+{
+    if (iouringd_ring_pending_submissions(&runtime->ring) == 0u) {
+        return 0;
+    }
+
+    if (iouringd_ring_flush_submissions(&runtime->ring) != 0) {
+        return 0;
+    }
+
+    return 1;
+}
+
 static int iouringd_reap_completions(struct iouringd_runtime *runtime)
 {
     int progress = 0;
@@ -4028,6 +4042,8 @@ static int iouringd_run(struct iouringd_runtime *runtime)
         }
         progress |= rc;
 
+        progress |= iouringd_flush_pending_submissions(runtime);
+
         rc = iouringd_reap_completions(runtime);
         if (rc < 0) {
             return -1;
@@ -4055,7 +4071,11 @@ static int iouringd_run(struct iouringd_runtime *runtime)
             continue;
         }
 
-        rc = poll(pollfds, nfds, -1);
+        rc = poll(pollfds,
+                  nfds,
+                  iouringd_ring_pending_submissions(&runtime->ring) != 0u
+                      ? IOURINGD_SUBMIT_RETRY_MS
+                      : -1);
         if (rc < 0) {
             if (iouringd_stop_requested != 0 && errno == EINTR) {
                 break;

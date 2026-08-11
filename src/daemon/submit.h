@@ -12,6 +12,19 @@
 struct io_uring_cqe;
 struct io_uring_sqe;
 
+/*
+ * Submission results. Publishing sq_tail hands the entry to the kernel, and a
+ * failing io_uring_enter() afterwards does not take it back: the entry stays
+ * queued and any later enter may run it. IOURINGD_SUBMIT_PUBLISHED reports
+ * exactly that, so callers MUST keep the task slot and every resource the entry
+ * references live and MUST NOT roll back; a completion still arrives. Only
+ * IOURINGD_SUBMIT_FAILED, which is returned before anything is published, is
+ * safe to roll back.
+ */
+#define IOURINGD_SUBMIT_OK 0
+#define IOURINGD_SUBMIT_PUBLISHED 1
+#define IOURINGD_SUBMIT_FAILED (-1)
+
 struct iouringd_ring {
     int ring_fd;
     uint32_t setup_flags;
@@ -46,6 +59,8 @@ int iouringd_ring_update_registered_file(struct iouringd_ring *ring,
                                          int fd);
 void iouringd_ring_cleanup(struct iouringd_ring *ring);
 unsigned iouringd_ring_capacity(const struct iouringd_ring *ring);
+unsigned iouringd_ring_pending_submissions(const struct iouringd_ring *ring);
+int iouringd_ring_flush_submissions(struct iouringd_ring *ring);
 int iouringd_ring_submit_nop(struct iouringd_ring *ring,
                              iouringd_task_id_t task_id,
                              uint16_t submit_priority);

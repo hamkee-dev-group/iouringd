@@ -900,3 +900,73 @@ add_test(
   NAME client_submit_validation
   COMMAND $<TARGET_FILE:client_submit_validation>
 )
+
+add_executable(enter_after_publish_rw_roundtrip
+  tests/integration/enter_after_publish_rw_roundtrip.c
+)
+target_link_libraries(enter_after_publish_rw_roundtrip PRIVATE iouringd)
+target_include_directories(enter_after_publish_rw_roundtrip PRIVATE include)
+set_target_properties(enter_after_publish_rw_roundtrip PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
+
+add_test(
+  NAME enter_after_publish_rw_roundtrip
+  COMMAND $<TARGET_FILE:enter_after_publish_rw_roundtrip> $<TARGET_FILE:iouringd_daemon>
+)
+
+add_executable(enter_after_publish_fixed_roundtrip
+  tests/integration/enter_after_publish_fixed_roundtrip.c
+)
+target_link_libraries(enter_after_publish_fixed_roundtrip PRIVATE iouringd)
+target_include_directories(enter_after_publish_fixed_roundtrip PRIVATE include)
+set_target_properties(enter_after_publish_fixed_roundtrip PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
+
+add_test(
+  NAME enter_after_publish_fixed_roundtrip
+  COMMAND $<TARGET_FILE:enter_after_publish_fixed_roundtrip> $<TARGET_FILE:iouringd_daemon>
+)
+
+add_executable(enter_after_publish_result_slot_roundtrip
+  tests/integration/enter_after_publish_result_slot_roundtrip.c
+)
+target_link_libraries(enter_after_publish_result_slot_roundtrip PRIVATE iouringd)
+target_include_directories(enter_after_publish_result_slot_roundtrip PRIVATE include)
+set_target_properties(enter_after_publish_result_slot_roundtrip PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
+
+add_test(
+  NAME enter_after_publish_result_slot_roundtrip
+  COMMAND $<TARGET_FILE:enter_after_publish_result_slot_roundtrip> $<TARGET_FILE:iouringd_daemon>
+)
+
+add_executable(enter_after_publish_close_roundtrip
+  tests/integration/enter_after_publish_close_roundtrip.c
+)
+target_link_libraries(enter_after_publish_close_roundtrip PRIVATE iouringd)
+target_include_directories(enter_after_publish_close_roundtrip PRIVATE include)
+set_target_properties(enter_after_publish_close_roundtrip PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
+
+add_test(
+  NAME enter_after_publish_close_roundtrip
+  COMMAND $<TARGET_FILE:enter_after_publish_close_roundtrip> $<TARGET_FILE:iouringd_daemon>
+)
+
+add_executable(enter_after_publish_recovery_roundtrip
+  tests/integration/enter_after_publish_recovery_roundtrip.c
+)
+target_link_libraries(enter_after_publish_recovery_roundtrip PRIVATE iouringd)
+target_include_directories(enter_after_publish_recovery_roundtrip PRIVATE include)
+set_target_properties(enter_after_publish_recovery_roundtrip PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
+
+add_test(
+  NAME enter_after_publish_recovery_roundtrip
+  COMMAND $<TARGET_FILE:enter_after_publish_recovery_roundtrip> $<TARGET_FILE:iouringd_daemon>
+)
