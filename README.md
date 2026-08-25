@@ -41,8 +41,23 @@ iouringd [--ring-entries N] [--max-clients N] \
   [--job-id N] [--trace-stderr] SOCKET_PATH
 ```
 
-`--job-id` annotates stderr trace and metrics records for correlation with
-`cgroupd` or another orchestrator. `--trace-stderr` emits structured trace and
+Every numeric argument is bounded by a compile-time ceiling and the daemon
+refuses to start outside it, naming the flag and the accepted range:
+
+| Flag | Range |
+|------|-------|
+| `--ring-entries` | 2 - 64 |
+| `--max-clients` | 1 - 64 |
+| `--registered-fds` | 1 - 32 |
+| `--registered-buffers` | 1 - 4 |
+| `--per-client-credits` | 1 - 64 |
+| `--io-bytes-max` | 1 - 4096 |
+
+`--io-bytes-max` caps a single transfer, so 4096 is the largest read or write
+one request can carry.
+
+`--job-id` is numeric. `--job-id` annotates stderr trace and metrics records
+for correlation with `cgroupd` or another orchestrator. `--trace-stderr` emits structured trace and
 metrics lines to stderr in addition to the socket protocol trace stream.
 
 ## Documents

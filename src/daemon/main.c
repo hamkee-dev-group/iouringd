@@ -4169,6 +4169,18 @@ static int iouringd_parse_unsigned_arg(const char *value, unsigned *result)
     return 0;
 }
 
+static int iouringd_limit_out_of_range(const char *flag, unsigned value,
+                                       unsigned low, unsigned high)
+{
+    if (value >= low && value <= high) {
+        return 0;
+    }
+    fprintf(stderr,
+            "iouringd: %s must be between %u and %u (got %u)\n",
+            flag, low, high, value);
+    return -1;
+}
+
 static int iouringd_parse_args(struct iouringd_runtime *runtime,
                                int argc,
                                char **argv)
@@ -4226,18 +4238,24 @@ static int iouringd_parse_args(struct iouringd_runtime *runtime,
         return -1;
     }
 
-    if (runtime->limits.ring_entries < 2u ||
-        runtime->limits.ring_entries > IOURINGD_MAX_TASKS ||
-        runtime->limits.max_clients == 0u ||
-        runtime->limits.max_clients > IOURINGD_MAX_CLIENTS ||
-        runtime->limits.registered_fds_per_client == 0u ||
-        runtime->limits.registered_fds_per_client > IOURINGD_MAX_REGISTERED_FDS ||
-        runtime->limits.registered_buffers_per_client == 0u ||
-        runtime->limits.registered_buffers_per_client > IOURINGD_MAX_REGISTERED_BUFFERS ||
-        runtime->limits.per_client_credits == 0u ||
-        runtime->limits.per_client_credits > IOURINGD_MAX_TASKS ||
-        runtime->limits.io_bytes_max == 0u ||
-        runtime->limits.io_bytes_max > IOURINGD_MAX_IO_BYTES) {
+    if (iouringd_limit_out_of_range("--ring-entries",
+                                    runtime->limits.ring_entries,
+                                    2u, IOURINGD_MAX_TASKS) != 0 ||
+        iouringd_limit_out_of_range("--max-clients",
+                                    runtime->limits.max_clients,
+                                    1u, IOURINGD_MAX_CLIENTS) != 0 ||
+        iouringd_limit_out_of_range("--registered-fds",
+                                    runtime->limits.registered_fds_per_client,
+                                    1u, IOURINGD_MAX_REGISTERED_FDS) != 0 ||
+        iouringd_limit_out_of_range("--registered-buffers",
+                                    runtime->limits.registered_buffers_per_client,
+                                    1u, IOURINGD_MAX_REGISTERED_BUFFERS) != 0 ||
+        iouringd_limit_out_of_range("--per-client-credits",
+                                    runtime->limits.per_client_credits,
+                                    1u, IOURINGD_MAX_TASKS) != 0 ||
+        iouringd_limit_out_of_range("--io-bytes-max",
+                                    runtime->limits.io_bytes_max,
+                                    1u, IOURINGD_MAX_IO_BYTES) != 0) {
         errno = EINVAL;
         return -1;
     }
