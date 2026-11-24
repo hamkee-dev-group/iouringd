@@ -1322,6 +1322,35 @@ static void iouringd_clear_task_slot(struct iouringd_task_slot *task)
     task->close_fd = -1;
 }
 
+static void iouringd_close_rejected_fds(struct iouringd_client *client,
+                                        struct msghdr *msg)
+{
+    struct cmsghdr *cmsg;
+
+    for (cmsg = CMSG_FIRSTHDR(msg); cmsg != NULL;
+         cmsg = CMSG_NXTHDR(msg, cmsg)) {
+        size_t fd_count;
+        size_t index;
+
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+            continue;
+        }
+
+        fd_count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        for (index = 0; index < fd_count; ++index) {
+            int fd;
+
+            memcpy(&fd, CMSG_DATA(cmsg) + index * sizeof(fd), sizeof(fd));
+            close(fd);
+        }
+    }
+
+    if (client->received_fd >= 0) {
+        close(client->received_fd);
+        client->received_fd = -1;
+    }
+}
+
 static int iouringd_read_client_input(struct iouringd_client *client, int *closed)
 {
     *closed = 0;
@@ -1347,6 +1376,7 @@ static int iouringd_read_client_input(struct iouringd_client *client, int *close
             struct cmsghdr *cmsg;
 
             if ((msg.msg_flags & MSG_CTRUNC) != 0) {
+                iouringd_close_rejected_fds(client, &msg);
                 errno = EPROTO;
                 return -1;
             }
@@ -1355,16 +1385,9 @@ static int iouringd_read_client_input(struct iouringd_client *client, int *close
                  cmsg = CMSG_NXTHDR(&msg, cmsg)) {
                 if (cmsg->cmsg_level != SOL_SOCKET ||
                     cmsg->cmsg_type != SCM_RIGHTS ||
-                    cmsg->cmsg_len != CMSG_LEN(sizeof(int))) {
-                    errno = EPROTO;
-                    return -1;
-                }
-
-                if (client->received_fd >= 0) {
-                    int received_fd;
-
-                    memcpy(&received_fd, CMSG_DATA(cmsg), sizeof(received_fd));
-                    close(received_fd);
+                    cmsg->cmsg_len != CMSG_LEN(sizeof(int)) ||
+                    client->received_fd >= 0) {
+                    iouringd_close_rejected_fds(client, &msg);
                     errno = EPROTO;
                     return -1;
                 }
